@@ -1,19 +1,12 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import io from 'socket.io-client';
 
-// Import Google Fonts
-const fontLink = document.createElement('link');
-fontLink.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap';
-fontLink.rel = 'stylesheet';
-if (!document.head.querySelector(`link[href="${fontLink.href}"]`)) {
-  document.head.appendChild(fontLink);
-}
-
 const Canvas = () => {
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
   const socketRef = useRef(null);
   const lastPositionRef = useRef(null);
-  const mousePositionRef = useRef({ x: 400, y: 300 });
+  const mousePositionRef = useRef({ x: 0, y: 0 });
   const [isDrawing, setIsDrawing] = useState(false);
   const [userCount, setUserCount] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
@@ -23,30 +16,35 @@ const Canvas = () => {
   const [playingNotes, setPlayingNotes] = useState(new Set());
   const [draggingNote, setDraggingNote] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [isVoiceNotesCollapsed, setIsVoiceNotesCollapsed] = useState(false);
+  
+  // UI State
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentTool, setCurrentTool] = useState('pen');
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [opacity, setOpacity] = useState(100);
+  const [scale, setScale] = useState(1); // 1 = 100%, 2 = 200%, 0.5 = 50%
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  
+  // Store all drawing data for redrawing
+  const [drawingData, setDrawingData] = useState([]);
   
   // Color and user management
-  const [drawingColor, setDrawingColor] = useState('#8b5cf6');
-  const [userColor, setUserColor] = useState('#8b5cf6');
+  const [drawingColor, setDrawingColor] = useState('#000000');
+  const [backgroundColor, setBackgroundColor] = useState('#ffffff');
   const [userId, setUserId] = useState(null);
   const [connectedUsers, setConnectedUsers] = useState([]);
   const [userCursors, setUserCursors] = useState({});
-  const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
   
   // Predefined color palette
-  const colorPalette = [
-    '#8b5cf6', '#ef4444', '#10b981', '#f59e0b', '#06b6d4', 
-    '#ec4899', '#84cc16', '#f97316', '#6366f1', '#14b8a6',
-    '#f43f5e', '#22c55e', '#eab308', '#3b82f6', '#a855f7'
-  ];
+  const strokeColors = ['#000000', '#ef4444', '#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316'];
+  const backgroundColors = ['#ffffff', '#fecaca', '#bbf7d0', '#dbeafe', '#fef3c7', '#f3f4f6', '#e0e7ff', '#fce7f3', '#cffafe', '#ecfccb'];
 
   // Utility functions
   const generateUserId = () => {
     return Date.now().toString(36) + Math.random().toString(36).substr(2);
-  };
-
-  const getRandomColor = () => {
-    return colorPalette[Math.floor(Math.random() * colorPalette.length)];
   };
 
   const getUserInitials = (userId) => {
@@ -54,41 +52,44 @@ const Canvas = () => {
     return userId.substr(0, 2).toUpperCase();
   };
 
-  const handleDrawingColorChange = (color) => {
-    setDrawingColor(color);
-    if (socketRef.current && userId) {
-      socketRef.current.emit('drawing-color-change', {
-        userId,
-        color
-      });
+  // Canvas utilities - Convert mouse coordinates to logical canvas coordinates
+  const getCanvasCoordinates = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    return {
+      x: (mouseX - panX) / scale,
+      y: (mouseY - panY) / scale
+    };
+  };
+
+  const resizeCanvas = () => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (canvas && container) {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      // redrawCanvas will be called by useEffect
     }
   };
 
-  const handleColorPickerToggle = () => {
-    setIsColorPickerOpen(!isColorPickerOpen);
-  };
-
   useEffect(() => {
+    // Initialize canvas size
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
     // Initialize socket connection
     socketRef.current = io('http://localhost:3001');
-
     const socket = socketRef.current;
-
-    // Generate user ID and assign color
     const newUserId = generateUserId();
-    const newUserColor = getRandomColor();
     setUserId(newUserId);
-    setUserColor(newUserColor);
-    setDrawingColor(newUserColor); // Start with user color
 
     // Socket event listeners
     socket.on('connect', () => {
       console.log('Connected to server');
-      // Join with user information
-      socket.emit('user-join', { 
-        userId: newUserId, 
-        userColor: newUserColor 
-      });
+      socket.emit('user-join', { userId: newUserId });
     });
 
     socket.on('room-full', () => {
@@ -100,11 +101,13 @@ const Canvas = () => {
     });
 
     socket.on('drawing', (data) => {
+      setDrawingData(prev => [...prev, data]);
       drawLine(data);
     });
 
-    socket.on('load-drawing', (drawingData) => {
-      drawingData.forEach(data => drawLine(data));
+    socket.on('load-drawing', (drawingDataFromServer) => {
+      setDrawingData(drawingDataFromServer);
+      // redrawCanvas will be called by useEffect when drawingData changes
     });
 
     socket.on('load-voice-notes', (notes) => {
@@ -126,27 +129,12 @@ const Canvas = () => {
       setVoiceNotes([]);
     });
 
-    // New socket events for user management and colors
-    socket.on('users-update', (users) => {
-      setConnectedUsers(users);
-    });
-
-    socket.on('user-cursor', (cursorData) => {
-      setUserCursors(prev => ({
-        ...prev,
-        [cursorData.userId]: cursorData
-      }));
-    });
-
-    socket.on('drawing-color-changed', (colorData) => {
-      // Handle when other users change their drawing color
-      console.log(`User ${colorData.userId} changed drawing color to ${colorData.color}`);
-    });
-
     return () => {
+      window.removeEventListener('resize', resizeCanvas);
       socket.disconnect();
     };
   }, []);
+
 
   // Convert blob to base64 for sharing across users
   const blobToBase64 = (blob) => {
@@ -159,10 +147,17 @@ const Canvas = () => {
 
   const drawLine = useCallback((data) => {
     const canvas = canvasRef.current;
+    if (!canvas) return;
+    
     const ctx = canvas.getContext('2d');
 
-    ctx.strokeStyle = data.color || '#8b5cf6';
-    ctx.lineWidth = data.lineWidth || 3;
+    // Apply transform: context.setTransform(scale, 0, 0, scale, panX, panY)
+    ctx.setTransform(scale, 0, 0, scale, panX, panY);
+    
+    // Draw using logical coordinates (no extra scaling needed)
+    ctx.globalAlpha = (data.opacity || opacity) / 100;
+    ctx.strokeStyle = data.color || drawingColor;
+    ctx.lineWidth = data.lineWidth || strokeWidth;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
@@ -170,55 +165,136 @@ const Canvas = () => {
     ctx.moveTo(data.x0, data.y0);
     ctx.lineTo(data.x1, data.y1);
     ctx.stroke();
-  }, []);
+    ctx.globalAlpha = 1;
+  }, [drawingColor, strokeWidth, opacity, scale, panX, panY]);
+
+  // Redraw all stored drawing data
+  const redrawCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const gridSize = 20;
+    
+    // Reset transform and clear canvas
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Set background
+    ctx.fillStyle = backgroundColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Apply transform: context.setTransform(scale, 0, 0, scale, panX, panY)
+    ctx.setTransform(scale, 0, 0, scale, panX, panY);
+    
+    // Draw grid dots in logical coordinates
+    ctx.fillStyle = '#e5e7eb';
+    
+    // Calculate visible area in logical coordinates
+    const visibleStartX = Math.floor((-panX / scale - gridSize) / gridSize) * gridSize;
+    const visibleEndX = Math.ceil((canvas.width - panX) / scale / gridSize) * gridSize;
+    const visibleStartY = Math.floor((-panY / scale - gridSize) / gridSize) * gridSize;
+    const visibleEndY = Math.ceil((canvas.height - panY) / scale / gridSize) * gridSize;
+    
+    for (let x = visibleStartX; x <= visibleEndX; x += gridSize) {
+      for (let y = visibleStartY; y <= visibleEndY; y += gridSize) {
+        ctx.beginPath();
+        ctx.arc(x, y, 1 / scale, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+    
+    // Then redraw all stored drawing data using their logical coordinates
+    drawingData.forEach(data => {
+      // Apply transform for each line (already set above, but ensuring consistency)
+      ctx.setTransform(scale, 0, 0, scale, panX, panY);
+      
+      // Draw using logical coordinates (no extra scaling needed)
+      ctx.globalAlpha = (data.opacity || opacity) / 100;
+      ctx.strokeStyle = data.color || drawingColor;
+      ctx.lineWidth = data.lineWidth || strokeWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      ctx.beginPath();
+      ctx.moveTo(data.x0, data.y0);
+      ctx.lineTo(data.x1, data.y1);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    });
+  }, [scale, panX, panY, backgroundColor, drawingData, opacity, drawingColor, strokeWidth]);
+
+  // Redraw everything when scale, pan, or background changes
+  useEffect(() => {
+    if (canvasRef.current) {
+      redrawCanvas();
+    }
+  }, [scale, panX, panY, backgroundColor, redrawCanvas]);
 
   const startDrawing = useCallback((e) => {
-    if (draggingNote) return; // Don't draw while dragging
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    lastPositionRef.current = { x, y };
+    if (draggingNote) return;
+    
+    if (currentTool === 'hand') {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - panX, y: e.clientY - panY });
+      return;
+    }
+    
+    if (currentTool !== 'pen') return;
+    const coords = getCanvasCoordinates(e);
+    lastPositionRef.current = coords;
     setIsDrawing(true);
-  }, [draggingNote]);
+  }, [draggingNote, currentTool, panX, panY]);
 
   const draw = useCallback((e) => {
-    if (!isDrawing || draggingNote) return;
+    if (!isDrawing || draggingNote || currentTool !== 'pen') return;
 
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const coords = getCanvasCoordinates(e); // These are logical coordinates
 
     if (lastPositionRef.current) {
       const drawData = {
         x0: lastPositionRef.current.x,
         y0: lastPositionRef.current.y,
-        x1: x,
-        y1: y,
+        x1: coords.x,
+        y1: coords.y,
         color: drawingColor,
-        lineWidth: 3,
+        lineWidth: strokeWidth,
+        opacity: opacity,
         userId: userId
       };
+      
+      // Store drawing data locally for redrawing
+      setDrawingData(prev => [...prev, drawData]);
+      
+      // Draw the line
       drawLine(drawData);
+      
+      // Send to other users
       socketRef.current.emit('drawing', drawData);
     }
 
-    lastPositionRef.current = { x, y };
-  }, [isDrawing, drawLine, draggingNote, drawingColor, userId]);
+    lastPositionRef.current = coords;
+  }, [isDrawing, drawLine, draggingNote, drawingColor, strokeWidth, opacity, userId, currentTool]);
 
   const stopDrawing = useCallback(() => {
     setIsDrawing(false);
     lastPositionRef.current = null;
   }, []);
 
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    const newScale = Math.max(0.25, Math.min(3, scale + delta));
+    setScale(newScale);
+  }, [scale]);
+
   const clearCanvas = () => {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setDrawingData([]);
+    // redrawCanvas will be called automatically by useEffect when drawingData changes
   };
 
   const handleClearCanvas = () => {
+    setDrawingData([]);
     socketRef.current.emit('clear-canvas');
   };
 
@@ -343,37 +419,38 @@ const Canvas = () => {
   };
 
   const handleMouseMove = useCallback((e) => {
-    if (canvasRef.current) {
-      const rect = canvasRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
+    if (!canvasRef.current) return;
 
-      mousePositionRef.current = { x, y };
-
-      // Emit cursor position for other users
-      if (userId && socketRef.current) {
-        socketRef.current.emit('cursor-move', {
-          userId,
-          x,
-          y,
-          userColor
-        });
-      }
-
-      if (draggingNote) {
-        const newX = x - dragOffset.x;
-        const newY = y - dragOffset.y;
-
-        setVoiceNotes(prev => prev.map(note =>
-          note.id === draggingNote
-            ? { ...note, x: newX, y: newY }
-            : note
-        ));
-      }
+    if (isPanning) {
+      const newPanX = e.clientX - panStart.x;
+      const newPanY = e.clientY - panStart.y;
+      setPanX(newPanX);
+      setPanY(newPanY);
+      // Grid will be redrawn automatically by useEffect
+      return;
     }
-  }, [draggingNote, dragOffset, userId, userColor]);
+
+    const coords = getCanvasCoordinates(e);
+    mousePositionRef.current = coords;
+
+    if (draggingNote) {
+      const newX = coords.x - dragOffset.x;
+      const newY = coords.y - dragOffset.y;
+
+      setVoiceNotes(prev => prev.map(note =>
+        note.id === draggingNote
+          ? { ...note, x: newX, y: newY }
+          : note
+      ));
+    }
+  }, [draggingNote, dragOffset, isPanning, panStart]);
 
   const handleMouseUp = useCallback(() => {
+    if (isPanning) {
+      setIsPanning(false);
+      return;
+    }
+    
     if (draggingNote) {
       const draggedNote = voiceNotes.find(note => note.id === draggingNote);
       if (draggedNote) {
@@ -386,53 +463,78 @@ const Canvas = () => {
       setDraggingNote(null);
       setDragOffset({ x: 0, y: 0 });
     }
-  }, [draggingNote, voiceNotes]);
+  }, [draggingNote, voiceNotes, isPanning]);
 
-  // Waveform animation component
-  const WaveformAnimation = ({ isPlaying }) => {
-    if (!isPlaying) return null;
+  // UI Components
+  const ToolbarButton = ({ icon, active, onClick, title }) => (
+    <button
+      onClick={onClick}
+      title={title}
+      className={`toolbar-btn ${active ? 'active' : ''}`}
+    >
+      {icon}
+    </button>
+  );
 
-    return (
-      <div style={{
-        position: 'absolute',
-        top: '50%',
-        left: '50%',
-        transform: 'translate(-50%, -50%)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '1px'
-      }}>
-        {[1, 2, 3, 4].map(i => (
-          <div
-            key={i}
-            style={{
-              width: '2px',
-              backgroundColor: '#fff',
-              borderRadius: '1px',
-              animation: `waveform 0.6s ease-in-out infinite`,
-              animationDelay: `${i * 0.1}s`,
-              height: '8px'
-            }}
-          />
-        ))}
-      </div>
-    );
-  };
+  const ColorButton = ({ color, active, onClick }) => (
+    <button
+      onClick={() => onClick(color)}
+      className={`color-btn ${active ? 'active' : ''}`}
+      style={{ backgroundColor: color }}
+    />
+  );
+
+  const StrokeWidthButton = ({ width, active, onClick }) => (
+    <button
+      onClick={() => onClick(width)}
+      className={`stroke-btn ${active ? 'active' : ''}`}
+    >
+      <div 
+        style={{
+          width: '20px',
+          height: `${width}px`,
+          backgroundColor: '#374151',
+          borderRadius: '10px'
+        }}
+      />
+    </button>
+  );
 
   if (roomFull) {
     return (
-      <div className="container fade-in" style={{ textAlign: 'center', minHeight: '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        <h2 className="main-title">Room is Full</h2>
-        <p className="description-text">Maximum 2 users allowed. Please try again later.</p>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        backgroundColor: '#f9fafb',
+        fontFamily: 'system-ui, -apple-system, sans-serif'
+      }}>
+        <div style={{
+          textAlign: 'center',
+          padding: '2rem',
+          backgroundColor: 'white',
+          borderRadius: '12px',
+          boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'
+        }}>
+          <h2 style={{ fontSize: '1.5rem', fontWeight: '600', color: '#111827', marginBottom: '0.5rem' }}>Room is Full</h2>
+          <p style={{ color: '#6b7280' }}>Maximum 2 users allowed. Please try again later.</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="container fade-in">
+    <div style={{
+      width: '100vw',
+      height: '100vh',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      backgroundColor: '#f9fafb',
+      position: 'relative',
+      overflow: 'hidden'
+    }}>
       <style>
         {`
-          /* CSS Reset and Base Styles */
           * {
             box-sizing: border-box;
             margin: 0;
@@ -440,582 +542,497 @@ const Canvas = () => {
           }
           
           body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            color: #f8fafc;
-            line-height: 1.6;
-            min-height: 100vh;
-          }
-          
-          /* Fade-in animation */
-          @keyframes fadeIn {
-            from {
-              opacity: 0;
-              transform: translateY(20px);
-            }
-            to {
-              opacity: 1;
-              transform: translateY(0);
-            }
-          }
-          
-          .fade-in {
-            animation: fadeIn 0.8s ease-out;
-          }
-          
-          @keyframes waveform {
-            0%, 100% { height: 4px; }
-            50% { height: 12px; }
-          }
-          
-          @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.1); }
-            100% { transform: scale(1); }
-          }
-          
-          /* Modern Button Styles */
-          .modern-button {
-            border: none;
-            border-radius: 16px;
-            padding: 14px 28px;
-            font-family: inherit;
-            font-weight: 600;
-            font-size: 15px;
-            cursor: pointer;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(20px);
-            position: relative;
+            margin: 0;
+            padding: 0;
             overflow: hidden;
+            background: #ffffff;
           }
           
-          .modern-button::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-            transition: left 0.5s;
+          #root {
+            margin: 0;
+            padding: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #ffffff;
           }
           
-          .modern-button:hover::before {
-            left: 100%;
-          }
-          
-          .button-primary {
-            background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 50%, #c084fc 100%);
-            color: white;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-          }
-          
-          .button-primary:hover {
-            background: linear-gradient(135deg, #7c3aed 0%, #9333ea 50%, #a855f7 100%);
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.4);
-          }
-          
-          .button-secondary {
-            background: linear-gradient(135deg, #64748b 0%, #475569 50%, #334155 100%);
-            color: white;
-            border: 1px solid rgba(100, 116, 139, 0.3);
-          }
-          
-          .button-secondary:hover {
-            background: linear-gradient(135deg, #475569 0%, #334155 50%, #1e293b 100%);
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0 8px 25px rgba(100, 116, 139, 0.4);
-          }
-          
-          .button-danger {
-            background: linear-gradient(135deg, #f43f5e 0%, #e11d48 50%, #be123c 100%);
-            color: white;
-            border: 1px solid rgba(244, 63, 94, 0.3);
-          }
-          
-          .button-danger:hover {
-            background: linear-gradient(135deg, #e11d48 0%, #be123c 50%, #9f1239 100%);
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0 8px 25px rgba(244, 63, 94, 0.4);
-          }
-          
-          .button-success {
-            background: linear-gradient(135deg, #06d6a0 0%, #10b981 50%, #059669 100%);
-            color: white;
-            border: 1px solid rgba(6, 214, 160, 0.3);
-          }
-          
-          .button-success:hover {
-            background: linear-gradient(135deg, #10b981 0%, #059669 50%, #047857 100%);
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0 8px 25px rgba(6, 214, 160, 0.4);
-          }
-          
-          /* Canvas Container */
-          .canvas-container {
-            border-radius: 16px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            overflow: hidden;
-            border: 2px solid #444;
+          /* Top Toolbar */
+          .top-toolbar {
+            position: fixed;
+            top: 12px;
+            left: 50%;
+            transform: translateX(-50%);
             background: white;
+            border-radius: 8px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            z-index: 1000;
           }
           
-          /* Voice Note Styles */
+          .toolbar-btn {
+            border: none;
+            background: none;
+            padding: 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+            font-size: 16px;
+            color: #374151;
+            min-width: 36px;
+            min-height: 36px;
+          }
+          
+          .toolbar-btn:hover {
+            background-color: #f3f4f6;
+          }
+          
+          .toolbar-btn.active {
+            background-color: #e0e7ff;
+            color: #3730a3;
+          }
+          
+          .toolbar-divider {
+            width: 1px;
+            height: 24px;
+            background-color: #e5e7eb;
+            margin: 0 4px;
+          }
+          
+          /* Left Sidebar */
+          .left-sidebar {
+            position: fixed;
+            top: 80px;
+            left: 16px;
+            background: white;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border: 1px solid #e5e7eb;
+            width: 240px;
+            max-height: calc(100vh - 120px);
+            overflow-y: auto;
+            z-index: 999;
+            transition: transform 0.3s ease;
+            transform: translateX(${sidebarOpen ? '0' : '-100%'});
+          }
+          
+          .sidebar-section {
+            margin-bottom: 20px;
+          }
+          
+          .sidebar-section:last-child {
+            margin-bottom: 0;
+          }
+          
+          .sidebar-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 8px;
+          }
+          
+          .color-grid {
+            display: flex;
+            gap: 8px;
+            padding: 12px 8px;
+            margin-bottom: 8px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            background: #f9fafb;
+            border-radius: 8px;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+            scrollbar-width: thin;
+            scrollbar-color: #cbd5e1 transparent;
+          }
+          
+          .color-grid::-webkit-scrollbar {
+            height: 4px;
+          }
+          
+          .color-grid::-webkit-scrollbar-track {
+            background: transparent;
+          }
+          
+          .color-grid::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 2px;
+          }
+          
+          .color-btn {
+            border: none;
+            width: 32px;
+            height: 32px;
+            min-width: 32px;
+            min-height: 32px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            border: 2px solid transparent;
+            flex-shrink: 0;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+          }
+          
+          .color-btn:hover {
+            transform: scale(1.1);
+          }
+          
+          .color-btn.active {
+            border-color: #3730a3;
+            transform: scale(1.1);
+            box-shadow: 0 0 0 2px rgba(55, 48, 163, 0.3);
+          }
+          
+          .stroke-options {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+          }
+          
+          .stroke-btn {
+            border: none;
+            background: #f9fafb;
+            padding: 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            border: 2px solid transparent;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          
+          .stroke-btn:hover {
+            background-color: #f3f4f6;
+          }
+          
+          .stroke-btn.active {
+            background-color: #e0e7ff;
+            border-color: #3730a3;
+          }
+          
+          .opacity-slider {
+            width: 100%;
+            height: 4px;
+            border-radius: 2px;
+            background: #e5e7eb;
+            outline: none;
+            -webkit-appearance: none;
+            margin: 8px 0;
+          }
+          
+          .opacity-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #3730a3;
+            cursor: pointer;
+            border: 2px solid white;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+          }
+          
+          .opacity-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+          }
+          
+          /* Bottom Controls */
+          .bottom-controls {
+            position: fixed;
+            bottom: 16px;
+            left: 16px;
+            background: white;
+            border-radius: 8px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border: 1px solid #e5e7eb;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            z-index: 999;
+          }
+          
+          .zoom-btn {
+            border: none;
+            background: none;
+            padding: 6px;
+            border-radius: 4px;
+            cursor: pointer;
+            color: #374151;
+            font-size: 14px;
+            min-width: 32px;
+            min-height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          }
+          
+          .zoom-btn:hover {
+            background-color: #f3f4f6;
+          }
+          
+          .zoom-level {
+            font-size: 14px;
+            color: #374151;
+            font-weight: 500;
+            min-width: 40px;
+            text-align: center;
+          }
+          
+          /* Voice Notes */
           .voice-note {
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            opacity: 0.8;
-            backdrop-filter: blur(8px);
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #3b82f6;
+            border: 3px solid white;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.15s ease;
+            z-index: 100;
           }
           
           .voice-note:hover {
-            transform: scale(1.2);
-            opacity: 1;
-            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+            transform: scale(1.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
           }
           
           .voice-note.playing {
             animation: pulse 1s ease-in-out infinite;
-            opacity: 1;
           }
           
           .voice-note.dragging {
             transform: scale(1.1);
-            opacity: 0.9;
             z-index: 1000;
-            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
           }
           
-          /* Voice Notes Panel */
-          .voice-notes-panel {
-            background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(51, 65, 85, 0.95));
-            border-radius: 20px;
-            padding: 24px;
-            margin-top: 32px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-            border: 1px solid rgba(139, 92, 246, 0.2);
-            backdrop-filter: blur(20px);
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
+          @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
           }
           
-          .voice-notes-panel::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.5), transparent);
-          }
-          
-          .panel-collapsed {
-            padding: 16px 24px;
-          }
-          
-          .toggle-button {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(168, 85, 247, 0.1));
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            color: #c4b5fd;
-            font-size: 16px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            padding: 10px 12px;
-            border-radius: 12px;
-            backdrop-filter: blur(10px);
-          }
-          
-          .toggle-button:hover {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(168, 85, 247, 0.2));
-            color: #ddd6fe;
-            transform: scale(1.05);
-          }
-          
-          /* Typography */
-          .main-title {
-            font-size: 2.75rem;
-            font-weight: 800;
-            background: linear-gradient(135deg, #f59e0b 0%, #f97316 25%, #ef4444 50%, #ec4899 75%, #8b5cf6 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 8px;
-            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            letter-spacing: -0.025em;
-          }
-          
-          .section-title {
-            font-size: 1.375rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #fbbf24, #f59e0b);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 12px;
-            letter-spacing: -0.0125em;
-          }
-          
-          .user-count {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(168, 85, 247, 0.15));
-            color: #c4b5fd;
+          /* Library Button */
+          .library-btn {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
             padding: 8px 16px;
-            border-radius: 25px;
-            font-size: 14px;
-            font-weight: 600;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            backdrop-filter: blur(10px);
-          }
-          
-          .description-text {
-            color: #cbd5e1;
-            font-size: 15px;
-            line-height: 1.6;
-            font-weight: 400;
-          }
-          
-          /* Color Picker Styles */
-          .color-picker-toolbar {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            cursor: pointer;
             display: flex;
             align-items: center;
-            gap: 12px;
-            padding: 12px 16px;
-            background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(51, 65, 85, 0.95));
-            border-radius: 16px;
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(139, 92, 246, 0.2);
-            margin-bottom: 16px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-          }
-          
-          .color-picker-button {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 12px;
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(168, 85, 247, 0.1));
-            color: #c4b5fd;
-            cursor: pointer;
-            transition: all 0.3s ease;
+            gap: 8px;
             font-size: 14px;
             font-weight: 500;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-          }
-          
-          .color-picker-button:hover {
-            background: linear-gradient(135deg, rgba(139, 92, 246, 0.2), rgba(168, 85, 247, 0.2));
-            transform: translateY(-1px);
-          }
-          
-          .current-color-indicator {
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            border: 2px solid rgba(255, 255, 255, 0.8);
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-          }
-          
-          .color-palette {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 8px;
-            padding: 16px;
-            background: linear-gradient(135deg, rgba(30, 41, 59, 0.98), rgba(51, 65, 85, 0.98));
-            border-radius: 16px;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            backdrop-filter: blur(30px);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-            position: absolute;
-            top: 100%;
-            left: 0;
+            color: #374151;
             z-index: 1000;
-            margin-top: 8px;
           }
           
-          .color-option {
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            border: 2px solid rgba(255, 255, 255, 0.3);
+          .library-btn:hover {
+            background-color: #f9fafb;
+          }
+          
+          /* Sidebar Toggle */
+          .sidebar-toggle {
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
             cursor: pointer;
-            transition: all 0.2s ease;
-            position: relative;
-          }
-          
-          .color-option:hover {
-            transform: scale(1.1);
-            border-color: rgba(255, 255, 255, 0.8);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-          }
-          
-          .color-option.selected {
-            border-color: #fff;
-            border-width: 3px;
-            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.5);
-          }
-          
-          .custom-color-input {
-            width: 36px;
-            height: 36px;
-            border: none;
-            border-radius: 50%;
-            cursor: pointer;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-          }
-          
-          .user-cursors {
-            position: absolute;
-            pointer-events: none;
-            z-index: 500;
-          }
-          
-          .user-cursor {
-            position: absolute;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            border: 2px solid rgba(255, 255, 255, 0.9);
-            backdrop-filter: blur(4px);
-            transform: translate(-50%, -50%);
-            transition: all 0.1s ease;
-          }
-          
-          .user-cursor::after {
-            content: attr(data-user);
-            position: absolute;
-            top: -28px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.8);
-            color: white;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-weight: 500;
-            white-space: nowrap;
-          }
-          
-          .users-list {
+            z-index: 1001;
             display: flex;
             align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
+            justify-content: center;
+            min-width: 40px;
+            min-height: 40px;
           }
           
-          .user-badge {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            border-radius: 20px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            font-size: 12px;
-            font-weight: 500;
-          }
-          
-          .user-color-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.5);
-          }
-          
-          /* Responsive Design */
-          .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 32px 24px;
-          }
-          
-          .header {
-            display: grid;
-            grid-template-columns: 1fr auto auto;
-            gap: 24px;
-            align-items: center;
-            margin-bottom: 32px;
-          }
-          
-          .controls {
-            display: flex;
-            gap: 16px;
-            align-items: center;
-            flex-wrap: wrap;
-          }
-          
-          @media (max-width: 768px) {
-            .header {
-              grid-template-columns: 1fr;
-              gap: 16px;
-              text-align: center;
-            }
-            
-            .controls {
-              justify-content: center;
-            }
-            
-            .main-title {
-              font-size: 2rem;
-            }
-            
-            .canvas-container canvas {
-              max-width: 100%;
-              height: auto;
-            }
-          }
-          
-          @media (max-width: 480px) {
-            .container {
-              padding: 24px 16px;
-            }
-            
-            .controls {
-              flex-direction: column;
-              width: 100%;
-            }
-            
-            .modern-button {
-              width: 100%;
-              justify-content: center;
-            }
+          .sidebar-toggle:hover {
+            background-color: #f9fafb;
           }
         `}
       </style>
 
-      <div className="header">
-        <div>
-          <h1 className="main-title">Collaborative Whiteboard</h1>
-          <span className="user-count">Users online: {userCount}/2</span>
-        </div>
-        <div className="controls">
-          <button 
-            onClick={handleClearCanvas} 
-            className="modern-button button-secondary"
-          >
-            Clear Canvas
-          </button>
-          <button
-            onClick={isRecording ? stopRecording : startRecording}
-            className={`modern-button ${isRecording ? 'button-danger' : 'button-primary'}`}
-          >
-            {isRecording ? '⏹ Stop Recording' : '🎙 Record Voice Note'}
-          </button>
-        </div>
-        <div className="users-list">
-          {connectedUsers.map(user => (
-            <div key={user.userId} className="user-badge" style={{ background: `${user.userColor}20` }}>
-              <div 
-                className="user-color-dot" 
-                style={{ backgroundColor: user.userColor }}
-              ></div>
-              <span>{getUserInitials(user.userId)}</span>
-            </div>
-          ))}
-        </div>
+      {/* Sidebar Toggle */}
+      <button 
+        className="sidebar-toggle"
+        onClick={() => setSidebarOpen(!sidebarOpen)}
+      >
+        <span style={{ fontSize: '18px' }}>☰</span>
+      </button>
+
+      {/* Top Toolbar */}
+      <div className="top-toolbar">
+        <ToolbarButton icon="🔒" active={false} onClick={() => {}} title="Lock" />
+        <ToolbarButton icon="👆" active={currentTool === 'select'} onClick={() => setCurrentTool('select')} title="Select" />
+        <ToolbarButton icon="🖐" active={currentTool === 'hand'} onClick={() => setCurrentTool('hand')} title="Hand" />
+        <div className="toolbar-divider" />
+        <ToolbarButton icon="⬜" active={currentTool === 'rectangle'} onClick={() => setCurrentTool('rectangle')} title="Rectangle" />
+        <ToolbarButton icon="◇" active={currentTool === 'diamond'} onClick={() => setCurrentTool('diamond')} title="Diamond" />
+        <ToolbarButton icon="○" active={currentTool === 'circle'} onClick={() => setCurrentTool('circle')} title="Circle" />
+        <ToolbarButton icon="→" active={currentTool === 'arrow'} onClick={() => setCurrentTool('arrow')} title="Arrow" />
+        <ToolbarButton icon="—" active={currentTool === 'line'} onClick={() => setCurrentTool('line')} title="Line" />
+        <div className="toolbar-divider" />
+        <ToolbarButton icon="✏️" active={currentTool === 'pen'} onClick={() => setCurrentTool('pen')} title="Pen" />
+        <ToolbarButton icon="A" active={currentTool === 'text'} onClick={() => setCurrentTool('text')} title="Text" />
+        <ToolbarButton icon="🖼" active={false} onClick={() => {}} title="Image" />
+        <ToolbarButton icon="🎙" active={isRecording} onClick={isRecording ? stopRecording : startRecording} title={isRecording ? 'Stop Recording' : 'Record Voice Note'} />
+        <div className="toolbar-divider" />
+        <ToolbarButton icon="🗑️" active={false} onClick={handleClearCanvas} title="Clear Canvas" />
       </div>
 
-      {/* Color Picker Toolbar */}
-      <div className="color-picker-toolbar">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span style={{ fontSize: '14px', fontWeight: '500', color: '#cbd5e1' }}>Drawing Color:</span>
-          <div 
-            className="current-color-indicator" 
-            style={{ backgroundColor: drawingColor }}
-          ></div>
-        </div>
-        
-        <div style={{ position: 'relative' }}>
-          <button 
-            className="color-picker-button"
-            onClick={handleColorPickerToggle}
-          >
-            🎨 Change Color
-          </button>
-          
-          {isColorPickerOpen && (
-            <div className="color-palette">
-              {colorPalette.map(color => (
-                <div
-                  key={color}
-                  className={`color-option ${drawingColor === color ? 'selected' : ''}`}
-                  style={{ backgroundColor: color }}
-                  onClick={() => {
-                    handleDrawingColorChange(color);
-                    setIsColorPickerOpen(false);
-                  }}
-                ></div>
-              ))}
-              <input
-                type="color"
-                className="custom-color-input"
-                value={drawingColor}
-                onChange={(e) => {
-                  handleDrawingColorChange(e.target.value);
-                  setIsColorPickerOpen(false);
-                }}
+      {/* Library Button */}
+      <button className="library-btn">
+        <span style={{ fontSize: '16px' }}>📚</span>
+        Library
+      </button>
+
+      {/* Left Sidebar */}
+      <div className="left-sidebar">
+        <div className="sidebar-section">
+          <div className="sidebar-title">Stroke</div>
+          <div className="color-grid">
+            {strokeColors.map(color => (
+              <ColorButton
+                key={color}
+                color={color}
+                active={drawingColor === color}
+                onClick={setDrawingColor}
               />
-            </div>
-          )}
+            ))}
+          </div>
         </div>
         
-        <div style={{ fontSize: '12px', color: '#94a3b8' }}>
-          Your Color: 
-          <div 
-            style={{ 
-              display: 'inline-block',
-              width: '16px', 
-              height: '16px', 
-              backgroundColor: userColor,
-              borderRadius: '50%',
-              marginLeft: '6px',
-              border: '1px solid rgba(255,255,255,0.3)'
-            }}
-          ></div>
+        <div className="sidebar-section">
+          <div className="sidebar-title">Background</div>
+          <div className="color-grid">
+            {backgroundColors.map(color => (
+              <ColorButton
+                key={color}
+                color={color}
+                active={backgroundColor === color}
+                onClick={setBackgroundColor}
+              />
+            ))}
+          </div>
+        </div>
+        
+        <div className="sidebar-section">
+          <div className="sidebar-title">Stroke width</div>
+          <div className="stroke-options">
+            <StrokeWidthButton width={1} active={strokeWidth === 1} onClick={setStrokeWidth} />
+            <StrokeWidthButton width={2} active={strokeWidth === 2} onClick={setStrokeWidth} />
+            <StrokeWidthButton width={4} active={strokeWidth === 4} onClick={setStrokeWidth} />
+          </div>
+        </div>
+        
+        <div className="sidebar-section">
+          <div className="sidebar-title">Opacity</div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={opacity}
+            onChange={(e) => setOpacity(parseInt(e.target.value))}
+            className="opacity-slider"
+          />
+          <div className="opacity-labels">
+            <span>0</span>
+            <span>100</span>
+          </div>
         </div>
       </div>
 
+      {/* Bottom Controls */}
+      <div className="bottom-controls">
+        <button 
+          className="zoom-btn"
+          onClick={() => setScale(Math.max(0.25, scale - 0.25))}
+        >
+          −
+        </button>
+        <div className="zoom-level">{Math.round(scale * 100)}%</div>
+        <button 
+          className="zoom-btn"
+          onClick={() => setScale(Math.min(3, scale + 0.25))}
+        >
+          +
+        </button>
+        <div className="toolbar-divider" />
+        <button 
+          className="zoom-btn" 
+          onClick={() => {
+            setScale(1);
+            setPanX(0);
+            setPanY(0);
+          }}
+          title="Reset zoom and center"
+        >
+          ⟲
+        </button>
+        <button 
+          className="zoom-btn" 
+          onClick={() => setScale(Math.min(3, scale * 1.2))}
+          title="Zoom in"
+        >
+          🔍
+        </button>
+      </div>
+
+      {/* Main Canvas */}
       <div
-        className="canvas-container"
-        style={{ position: 'relative', display: 'inline-block' }}
+        ref={containerRef}
+        style={{ 
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          cursor: currentTool === 'pen' ? 'crosshair' : 'default'
+        }}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
       >
         <canvas
           ref={canvasRef}
-          width={800}
-          height={600}
           style={{
-            cursor: draggingNote ? 'grabbing' : 'crosshair',
-            backgroundColor: 'white',
-            display: 'block'
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            cursor: draggingNote ? 'grabbing' : (currentTool === 'pen' ? 'crosshair' : (currentTool === 'hand' ? 'grab' : 'default'))
           }}
           onMouseDown={startDrawing}
           onMouseMove={draw}
           onMouseUp={stopDrawing}
           onMouseLeave={stopDrawing}
+          onWheel={handleWheel}
         />
-
-        {/* User cursor indicators */}
-        <div className="user-cursors">
-          {Object.entries(userCursors).map(([cursorUserId, cursor]) => {
-            if (cursorUserId === userId) return null; // Don't show own cursor
-            return (
-              <div
-                key={cursorUserId}
-                className="user-cursor"
-                style={{
-                  left: cursor.x,
-                  top: cursor.y,
-                  backgroundColor: cursor.userColor
-                }}
-                data-user={getUserInitials(cursorUserId)}
-              />
-            );
-          })}
-        </div>
 
         {/* Voice note indicators */}
         {voiceNotes.map(note => {
@@ -1034,108 +1051,19 @@ const Canvas = () => {
                 }
               }}
               style={{
-                position: 'absolute',
-                left: note.x - 25,
-                top: note.y - 25,
-                width: '50px',
-                height: '50px',
-                borderRadius: '50%',
-                background: isPlaying
-                  ? `linear-gradient(135deg, ${note.userColor}80, ${note.userColor}ff, ${note.userColor}cc)`
-                  : `linear-gradient(135deg, ${note.userColor}cc, ${note.userColor}ff, ${note.userColor}80)`,
-                border: '3px solid rgba(255, 255, 255, 0.9)',
-                boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)',
-                cursor: isDragging ? 'grabbing' : 'grab',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: '18px',
-                color: '#fff',
-                userSelect: 'none',
-                zIndex: isDragging ? 1000 : 10
+                left: note.x - 20,
+                top: note.y - 20,
               }}
               title="Click to play, drag to move"
             >
-              {isPlaying ? (
-                <WaveformAnimation isPlaying={true} />
-              ) : (
-                <span style={{ fontSize: '12px', fontWeight: 'bold' }}>
-                  {note.userInitials || getUserInitials(note.userId)}
-                </span>
-              )}
+              {isPlaying ? '⏸' : '▶'}
             </div>
           );
         })}
       </div>
-
-      <div className={`voice-notes-panel ${isVoiceNotesCollapsed ? 'panel-collapsed' : ''}`}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: isVoiceNotesCollapsed ? 0 : '16px' }}>
-          <h3 className="section-title">Voice Notes ({voiceNotes.length})</h3>
-          <button 
-            className="toggle-button"
-            onClick={() => setIsVoiceNotesCollapsed(!isVoiceNotesCollapsed)}
-            title={isVoiceNotesCollapsed ? 'Expand panel' : 'Collapse panel'}
-          >
-            {isVoiceNotesCollapsed ? '▼' : '▲'}
-          </button>
-        </div>
-        {!isVoiceNotesCollapsed && (
-          <div>
-            <p className="description-text">Click circles to play audio, drag to move them around the canvas.</p>
-            {voiceNotes.length > 0 && (
-              <div style={{ marginTop: '16px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
-                {voiceNotes.map((note, index) => (
-                  <div
-                    key={note.id}
-                    style={{
-                      background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(168, 85, 247, 0.1))',
-                      borderRadius: '16px',
-                      padding: '16px',
-                      border: '1px solid rgba(139, 92, 246, 0.3)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '12px',
-                      transition: 'all 0.3s ease',
-                      backdropFilter: 'blur(10px)'
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: '32px',
-                        height: '32px',
-                        borderRadius: '50%',
-                        background: playingNotes.has(note.id)
-                          ? `linear-gradient(135deg, ${note.userColor}80, ${note.userColor}ff)`
-                          : `linear-gradient(135deg, ${note.userColor}cc, ${note.userColor}ff)`,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        color: 'white',
-                        flexShrink: 0
-                      }}
-                      onClick={() => playVoiceNote(note)}
-                    >
-                      {playingNotes.has(note.id) ? '⏸' : '▶'}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '14px', fontWeight: '500', color: '#f1f5f9' }}>
-                        Voice Note #{index + 1} - {note.userInitials || getUserInitials(note.userId)}
-                      </div>
-                      <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
-                        {new Date(note.timestamp).toLocaleTimeString()}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
+
 };
 
 export default Canvas;

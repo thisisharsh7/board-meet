@@ -53,16 +53,18 @@ const Canvas = () => {
   };
 
   // Canvas utilities - Convert mouse coordinates to logical canvas coordinates
-  const getCanvasCoordinates = (e) => {
+  // This is the EXACT formula you specified: canvasX = (mouseX - panX) / scale
+  const getLogicalCoordinates = (e) => {
     const canvas = canvasRef.current;
     const rect = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
     
-    return {
-      x: (mouseX - panX) / scale,
-      y: (mouseY - panY) / scale
-    };
+    // Convert raw mouse coordinates to logical canvas coordinates
+    const canvasX = (mouseX - panX) / scale;
+    const canvasY = (mouseY - panY) / scale;
+    
+    return { x: canvasX, y: canvasY };
   };
 
   const resizeCanvas = () => {
@@ -145,16 +147,17 @@ const Canvas = () => {
     });
   };
 
+  // Draw a single line using logical coordinates
   const drawLine = useCallback((data) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
     const ctx = canvas.getContext('2d');
 
-    // Apply transform: context.setTransform(scale, 0, 0, scale, panX, panY)
+    // First apply the transformation: context.setTransform(scale, 0, 0, scale, panX, panY)
     ctx.setTransform(scale, 0, 0, scale, panX, panY);
     
-    // Draw using logical coordinates (no extra scaling needed)
+    // Then draw normally using logical coordinates (data is already in logical coords)
     ctx.globalAlpha = (data.opacity || opacity) / 100;
     ctx.strokeStyle = data.color || drawingColor;
     ctx.lineWidth = data.lineWidth || strokeWidth;
@@ -162,8 +165,8 @@ const Canvas = () => {
     ctx.lineJoin = 'round';
 
     ctx.beginPath();
-    ctx.moveTo(data.x0, data.y0);
-    ctx.lineTo(data.x1, data.y1);
+    ctx.moveTo(data.x0, data.y0);  // These are logical coordinates
+    ctx.lineTo(data.x1, data.y1);  // These are logical coordinates  
     ctx.stroke();
     ctx.globalAlpha = 1;
   }, [drawingColor, strokeWidth, opacity, scale, panX, panY]);
@@ -176,18 +179,18 @@ const Canvas = () => {
     const ctx = canvas.getContext('2d');
     const gridSize = 20;
     
-    // Reset transform and clear canvas
+    // Step 1: Reset transform and clear canvas
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Set background
+    // Step 2: Set background (no transform needed for background)
     ctx.fillStyle = backgroundColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // Apply transform: context.setTransform(scale, 0, 0, scale, panX, panY)
+    // Step 3: Apply transformation as you specified: context.setTransform(scale, 0, 0, scale, panX, panY)
     ctx.setTransform(scale, 0, 0, scale, panX, panY);
     
-    // Draw grid dots in logical coordinates
+    // Step 4: Draw grid dots using logical coordinates
     ctx.fillStyle = '#e5e7eb';
     
     // Calculate visible area in logical coordinates
@@ -204,12 +207,9 @@ const Canvas = () => {
       }
     }
     
-    // Then redraw all stored drawing data using their logical coordinates
+    // Step 5: Draw all stored paths normally using their logical coordinates
+    // The transform is already applied, so we just draw with the stored logical coordinates
     drawingData.forEach(data => {
-      // Apply transform for each line (already set above, but ensuring consistency)
-      ctx.setTransform(scale, 0, 0, scale, panX, panY);
-      
-      // Draw using logical coordinates (no extra scaling needed)
       ctx.globalAlpha = (data.opacity || opacity) / 100;
       ctx.strokeStyle = data.color || drawingColor;
       ctx.lineWidth = data.lineWidth || strokeWidth;
@@ -217,8 +217,8 @@ const Canvas = () => {
       ctx.lineJoin = 'round';
 
       ctx.beginPath();
-      ctx.moveTo(data.x0, data.y0);
-      ctx.lineTo(data.x1, data.y1);
+      ctx.moveTo(data.x0, data.y0);  // Stored logical coordinates
+      ctx.lineTo(data.x1, data.y1);  // Stored logical coordinates
       ctx.stroke();
       ctx.globalAlpha = 1;
     });
@@ -241,22 +241,26 @@ const Canvas = () => {
     }
     
     if (currentTool !== 'pen') return;
-    const coords = getCanvasCoordinates(e);
-    lastPositionRef.current = coords;
+    
+    // Convert raw mouse coordinates to logical coordinates
+    const logicalCoords = getLogicalCoordinates(e);
+    lastPositionRef.current = logicalCoords;
     setIsDrawing(true);
-  }, [draggingNote, currentTool, panX, panY]);
+  }, [draggingNote, currentTool, panX, panY, scale]);
 
   const draw = useCallback((e) => {
     if (!isDrawing || draggingNote || currentTool !== 'pen') return;
 
-    const coords = getCanvasCoordinates(e); // These are logical coordinates
+    // Convert raw mouse coordinates to logical coordinates
+    const logicalCoords = getLogicalCoordinates(e);
 
     if (lastPositionRef.current) {
+      // Store drawing data in LOGICAL coordinates (no scaling/panning applied)
       const drawData = {
         x0: lastPositionRef.current.x,
         y0: lastPositionRef.current.y,
-        x1: coords.x,
-        y1: coords.y,
+        x1: logicalCoords.x,
+        y1: logicalCoords.y,
         color: drawingColor,
         lineWidth: strokeWidth,
         opacity: opacity,
@@ -266,15 +270,16 @@ const Canvas = () => {
       // Store drawing data locally for redrawing
       setDrawingData(prev => [...prev, drawData]);
       
-      // Draw the line
+      // Draw the line immediately (this will apply transform automatically)
       drawLine(drawData);
       
-      // Send to other users
+      // Send to other users (they will receive logical coordinates)
       socketRef.current.emit('drawing', drawData);
     }
 
-    lastPositionRef.current = coords;
-  }, [isDrawing, drawLine, draggingNote, drawingColor, strokeWidth, opacity, userId, currentTool]);
+    // Update last position with logical coordinates
+    lastPositionRef.current = logicalCoords;
+  }, [isDrawing, drawLine, draggingNote, drawingColor, strokeWidth, opacity, userId, currentTool, scale, panX, panY]);
 
   const stopDrawing = useCallback(() => {
     setIsDrawing(false);
@@ -407,14 +412,13 @@ const Canvas = () => {
     e.stopPropagation();
     e.preventDefault();
 
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    // Convert to logical coordinates
+    const logicalCoords = getLogicalCoordinates(e);
 
     setDraggingNote(note.id);
     setDragOffset({
-      x: x - note.x,
-      y: y - note.y
+      x: logicalCoords.x - note.x,
+      y: logicalCoords.y - note.y
     });
   };
 
@@ -430,12 +434,13 @@ const Canvas = () => {
       return;
     }
 
-    const coords = getCanvasCoordinates(e);
-    mousePositionRef.current = coords;
+    // Convert to logical coordinates for voice notes
+    const logicalCoords = getLogicalCoordinates(e);
+    mousePositionRef.current = logicalCoords;
 
     if (draggingNote) {
-      const newX = coords.x - dragOffset.x;
-      const newY = coords.y - dragOffset.y;
+      const newX = logicalCoords.x - dragOffset.x;
+      const newY = logicalCoords.y - dragOffset.y;
 
       setVoiceNotes(prev => prev.map(note =>
         note.id === draggingNote
@@ -443,7 +448,7 @@ const Canvas = () => {
           : note
       ));
     }
-  }, [draggingNote, dragOffset, isPanning, panStart]);
+  }, [draggingNote, dragOffset, isPanning, panStart, scale, panX, panY]);
 
   const handleMouseUp = useCallback(() => {
     if (isPanning) {
@@ -1039,6 +1044,10 @@ const Canvas = () => {
           const isPlaying = playingNotes.has(note.id);
           const isDragging = draggingNote === note.id;
 
+          // Convert logical coordinates to screen coordinates for positioning
+          const screenX = note.x * scale + panX;
+          const screenY = note.y * scale + panY;
+
           return (
             <div
               key={note.id}
@@ -1051,8 +1060,8 @@ const Canvas = () => {
                 }
               }}
               style={{
-                left: note.x - 20,
-                top: note.y - 20,
+                left: screenX - 20,
+                top: screenY - 20,
               }}
               title="Click to play, drag to move"
             >

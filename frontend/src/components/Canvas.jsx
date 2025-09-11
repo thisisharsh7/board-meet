@@ -1,12 +1,25 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import io from 'socket.io-client';
+import { 
+  Hand, 
+  Square, 
+  Diamond, 
+  Circle, 
+  ArrowRight, 
+  Minus, 
+  PenTool, 
+  Type, 
+  Eraser, 
+  Mic, 
+  Trash2 
+} from 'lucide-react';
 
 const Canvas = () => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const socketRef = useRef(null);
   const lastPositionRef = useRef(null);
-  const mousePositionRef = useRef({ x: 0, y: 0 });
+  const mousePositionRef = useRef({ x: 100, y: 100 });
   const [isDrawing, setIsDrawing] = useState(false);
   const [userCount, setUserCount] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
@@ -30,17 +43,59 @@ const Canvas = () => {
   
   // Store all drawing data for redrawing
   const [drawingData, setDrawingData] = useState([]);
+  const [shapes, setShapes] = useState([]);
+  const [textElements, setTextElements] = useState([]);
+  
+  // Shape drawing state
+  const [isDrawingShape, setIsDrawingShape] = useState(false);
+  const [shapeStartPos, setShapeStartPos] = useState(null);
+  const [currentShape, setCurrentShape] = useState(null);
+  
+  // Text editing state
+  const [editingText, setEditingText] = useState(null);
+  const [textInput, setTextInput] = useState('');
+  
+  // Eraser state
+  const [eraserSize, setEraserSize] = useState(16);
+  const eraserCursorRef = useRef(null);
+  const [eraserTrail, setEraserTrail] = useState([]);
+  const drawingBoardRef = useRef(null);
   
   // Color and user management
   const [drawingColor, setDrawingColor] = useState('#000000');
   const [backgroundColor, setBackgroundColor] = useState('#ffffff');
   const [userId, setUserId] = useState(null);
+  const [userColor, setUserColor] = useState('#3b82f6');
   const [connectedUsers, setConnectedUsers] = useState([]);
   const [userCursors, setUserCursors] = useState({});
   
   // Predefined color palette
   const strokeColors = ['#000000', '#ef4444', '#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316'];
   const backgroundColors = ['#ffffff', '#fecaca', '#bbf7d0', '#dbeafe', '#fef3c7', '#f3f4f6', '#e0e7ff', '#fce7f3', '#cffafe', '#ecfccb'];
+
+  // Helper function to calculate distance from point to line segment
+  const distanceToLineSegment = (point, lineStart, lineEnd) => {
+    const A = point.x - lineStart.x;
+    const B = point.y - lineStart.y;
+    const C = lineEnd.x - lineStart.x;
+    const D = lineEnd.y - lineStart.y;
+
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    
+    if (lenSq === 0) return Math.sqrt(A * A + B * B);
+    
+    let param = dot / lenSq;
+    param = Math.max(0, Math.min(1, param));
+    
+    const xx = lineStart.x + param * C;
+    const yy = lineStart.y + param * D;
+    
+    const dx = point.x - xx;
+    const dy = point.y - yy;
+    
+    return Math.sqrt(dx * dx + dy * dy);
+  };
 
   // Utility functions
   const generateUserId = () => {
@@ -116,6 +171,14 @@ const Canvas = () => {
       setVoiceNotes(notes);
     });
 
+    socket.on('load-shapes', (loadedShapes) => {
+      setShapes(loadedShapes);
+    });
+
+    socket.on('load-text', (loadedText) => {
+      setTextElements(loadedText);
+    });
+
     socket.on('voice-note', (note) => {
       setVoiceNotes(prev => [...prev, note]);
     });
@@ -126,9 +189,80 @@ const Canvas = () => {
       ));
     });
 
+    socket.on('shape', (shapeData) => {
+      console.log('Received shape event:', shapeData);
+      setShapes(prev => [...prev, shapeData]);
+    });
+
+    socket.on('text', (textData) => {
+      setTextElements(prev => [...prev, textData]);
+    });
+
+    socket.on('erase-drawing', (eraseData) => {
+      console.log('Received erase-drawing event:', eraseData);
+      setDrawingData(prev => prev.filter(line => {
+        // Helper function for line segment distance calculation
+        const distanceToLine = (point, lineStart, lineEnd) => {
+          const A = point.x - lineStart.x;
+          const B = point.y - lineStart.y;
+          const C = lineEnd.x - lineStart.x;
+          const D = lineEnd.y - lineStart.y;
+
+          const dot = A * C + B * D;
+          const lenSq = C * C + D * D;
+          
+          if (lenSq === 0) return Math.sqrt(A * A + B * B);
+          
+          let param = dot / lenSq;
+          param = Math.max(0, Math.min(1, param));
+          
+          const xx = lineStart.x + param * C;
+          const yy = lineStart.y + param * D;
+          
+          const dx = point.x - xx;
+          const dy = point.y - yy;
+          
+          return Math.sqrt(dx * dx + dy * dy);
+        };
+        
+        const distance = distanceToLine(
+          eraseData,
+          { x: line.x0, y: line.y0 },
+          { x: line.x1, y: line.y1 }
+        );
+        return distance > eraseData.radius;
+      }));
+    });
+
+    socket.on('erase-shapes', (eraseData) => {
+      console.log('Received erase-shapes event:', eraseData);
+      setShapes(prev => prev.filter(shape => {
+        const shapeX = Math.min(shape.x, shape.x + shape.width);
+        const shapeY = Math.min(shape.y, shape.y + shape.height);
+        const shapeWidth = Math.abs(shape.width);
+        const shapeHeight = Math.abs(shape.height);
+        
+        return !(eraseData.x >= shapeX - eraseData.radius && 
+                 eraseData.x <= shapeX + shapeWidth + eraseData.radius &&
+                 eraseData.y >= shapeY - eraseData.radius && 
+                 eraseData.y <= shapeY + shapeHeight + eraseData.radius);
+      }));
+    });
+
+    socket.on('erase-text', (eraseData) => {
+      console.log('Received erase-text event:', eraseData);
+      setTextElements(prev => prev.filter(text => {
+        const distance = Math.sqrt(
+          Math.pow(eraseData.x - text.x, 2) + Math.pow(eraseData.y - text.y, 2)
+        );
+        return distance > eraseData.radius;
+      }));
+    });
+
     socket.on('clear-canvas', () => {
       clearCanvas();
       setVoiceNotes([]);
+      setShapes([]);
     });
 
     return () => {
@@ -167,6 +301,75 @@ const Canvas = () => {
     ctx.beginPath();
     ctx.moveTo(data.x0, data.y0);  // These are logical coordinates
     ctx.lineTo(data.x1, data.y1);  // These are logical coordinates  
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }, [drawingColor, strokeWidth, opacity, scale, panX, panY]);
+
+  // Draw a shape using logical coordinates
+  const drawShape = useCallback((shapeData) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(scale, 0, 0, scale, panX, panY);
+    
+    ctx.globalAlpha = (shapeData.opacity || opacity) / 100;
+    ctx.strokeStyle = shapeData.color || drawingColor;
+    ctx.lineWidth = shapeData.lineWidth || strokeWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.fillStyle = shapeData.fillColor || 'transparent';
+
+    ctx.beginPath();
+    
+    switch (shapeData.type) {
+      case 'rectangle':
+        ctx.rect(shapeData.x, shapeData.y, shapeData.width, shapeData.height);
+        break;
+      case 'circle':
+        const radius = Math.sqrt(shapeData.width * shapeData.width + shapeData.height * shapeData.height) / 2;
+        const centerX = shapeData.x + shapeData.width / 2;
+        const centerY = shapeData.y + shapeData.height / 2;
+        ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+        break;
+      case 'diamond':
+        const midX = shapeData.x + shapeData.width / 2;
+        const midY = shapeData.y + shapeData.height / 2;
+        ctx.moveTo(midX, shapeData.y);
+        ctx.lineTo(shapeData.x + shapeData.width, midY);
+        ctx.lineTo(midX, shapeData.y + shapeData.height);
+        ctx.lineTo(shapeData.x, midY);
+        ctx.closePath();
+        break;
+      case 'line':
+        ctx.moveTo(shapeData.x, shapeData.y);
+        ctx.lineTo(shapeData.x + shapeData.width, shapeData.y + shapeData.height);
+        break;
+      case 'arrow':
+        // Draw arrow line
+        const endX = shapeData.x + shapeData.width;
+        const endY = shapeData.y + shapeData.height;
+        ctx.moveTo(shapeData.x, shapeData.y);
+        ctx.lineTo(endX, endY);
+        
+        // Draw arrowhead
+        const headLength = 10;
+        const angle = Math.atan2(shapeData.height, shapeData.width);
+        ctx.lineTo(
+          endX - headLength * Math.cos(angle - Math.PI / 6),
+          endY - headLength * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(
+          endX - headLength * Math.cos(angle + Math.PI / 6),
+          endY - headLength * Math.sin(angle + Math.PI / 6)
+        );
+        break;
+    }
+    
+    if (shapeData.fillColor && shapeData.fillColor !== 'transparent') {
+      ctx.fill();
+    }
     ctx.stroke();
     ctx.globalAlpha = 1;
   }, [drawingColor, strokeWidth, opacity, scale, panX, panY]);
@@ -222,7 +425,26 @@ const Canvas = () => {
       ctx.stroke();
       ctx.globalAlpha = 1;
     });
-  }, [scale, panX, panY, backgroundColor, drawingData, opacity, drawingColor, strokeWidth]);
+    
+    // Step 6: Draw all shapes
+    shapes.forEach(shape => {
+      drawShape(shape);
+    });
+    
+    // Step 7: Draw current shape being drawn
+    if (currentShape) {
+      drawShape(currentShape);
+    }
+    
+    // Step 8: Draw text elements
+    textElements.forEach(textEl => {
+      ctx.globalAlpha = (textEl.opacity || opacity) / 100;
+      ctx.fillStyle = textEl.color || drawingColor;
+      ctx.font = `${textEl.fontSize || 16}px Arial`;
+      ctx.fillText(textEl.text, textEl.x, textEl.y);
+      ctx.globalAlpha = 1;
+    });
+  }, [scale, panX, panY, backgroundColor, drawingData, shapes, currentShape, textElements, opacity, drawingColor, strokeWidth, drawShape]);
 
   // Redraw everything when scale, pan, or background changes
   useEffect(() => {
@@ -230,6 +452,33 @@ const Canvas = () => {
       redrawCanvas();
     }
   }, [scale, panX, panY, backgroundColor, redrawCanvas]);
+
+  // Clean up eraser trail periodically
+  useEffect(() => {
+    if (eraserTrail.length === 0) return;
+    
+    const cleanupInterval = setInterval(() => {
+      setEraserTrail(prev => {
+        const cutoffTime = Date.now() - 300;
+        const filtered = prev.filter(point => point.timestamp > cutoffTime);
+        return filtered.length === prev.length ? prev : filtered;
+      });
+    }, 50);
+
+    return () => clearInterval(cleanupInterval);
+  }, [eraserTrail.length]);
+
+  // Handle cursor visibility when tool changes
+  useEffect(() => {
+    if (eraserCursorRef.current) {
+      if (currentTool === 'eraser') {
+        // Initialize cursor as hidden, will show when mouse enters drawing board
+        eraserCursorRef.current.style.visibility = 'hidden';
+      } else {
+        eraserCursorRef.current.style.visibility = 'hidden';
+      }
+    }
+  }, [currentTool]);
 
   const startDrawing = useCallback((e) => {
     if (draggingNote) return;
@@ -240,51 +489,282 @@ const Canvas = () => {
       return;
     }
     
-    if (currentTool !== 'pen') return;
+    const logicalCoords = getLogicalCoordinates(e);
     
-    // Convert raw mouse coordinates to logical coordinates
-    const logicalCoords = getLogicalCoordinates(e);
-    lastPositionRef.current = logicalCoords;
-    setIsDrawing(true);
-  }, [draggingNote, currentTool, panX, panY, scale]);
-
-  const draw = useCallback((e) => {
-    if (!isDrawing || draggingNote || currentTool !== 'pen') return;
-
-    // Convert raw mouse coordinates to logical coordinates
-    const logicalCoords = getLogicalCoordinates(e);
-
-    if (lastPositionRef.current) {
-      // Store drawing data in LOGICAL coordinates (no scaling/panning applied)
-      const drawData = {
-        x0: lastPositionRef.current.x,
-        y0: lastPositionRef.current.y,
-        x1: logicalCoords.x,
-        y1: logicalCoords.y,
+    if (currentTool === 'pen') {
+      lastPositionRef.current = logicalCoords;
+      setIsDrawing(true);
+      return;
+    }
+    
+    if (currentTool === 'eraser') {
+      setIsDrawing(true);
+      eraseAtPosition(logicalCoords);
+      return;
+    }
+    
+    // Handle text tool
+    if (currentTool === 'text') {
+      setEditingText({
+        x: logicalCoords.x,
+        y: logicalCoords.y,
+        color: drawingColor,
+        fontSize: 16,
+        opacity: opacity,
+        userId: userId
+      });
+      setTextInput('');
+      return;
+    }
+    
+    // Handle shape tools
+    if (['rectangle', 'circle', 'diamond', 'line', 'arrow'].includes(currentTool)) {
+      console.log('Starting shape drawing:', currentTool, 'at position:', logicalCoords);
+      setIsDrawingShape(true);
+      setShapeStartPos(logicalCoords);
+      setCurrentShape({
+        type: currentTool,
+        x: logicalCoords.x,
+        y: logicalCoords.y,
+        width: 0,
+        height: 0,
         color: drawingColor,
         lineWidth: strokeWidth,
         opacity: opacity,
         userId: userId
-      };
-      
-      // Store drawing data locally for redrawing
-      setDrawingData(prev => [...prev, drawData]);
-      
-      // Draw the line immediately (this will apply transform automatically)
-      drawLine(drawData);
-      
-      // Send to other users (they will receive logical coordinates)
-      socketRef.current.emit('drawing', drawData);
+      });
     }
+  }, [draggingNote, currentTool, panX, panY, scale, drawingColor, strokeWidth, opacity, userId]);
 
-    // Update last position with logical coordinates
-    lastPositionRef.current = logicalCoords;
-  }, [isDrawing, drawLine, draggingNote, drawingColor, strokeWidth, opacity, userId, currentTool, scale, panX, panY]);
+  const draw = useCallback((e) => {
+    if (draggingNote) return;
+    
+    const logicalCoords = getLogicalCoordinates(e);
+    
+    // Handle pen drawing
+    if (isDrawing && currentTool === 'pen') {
+      if (lastPositionRef.current) {
+        // Store drawing data in LOGICAL coordinates (no scaling/panning applied)
+        const drawData = {
+          x0: lastPositionRef.current.x,
+          y0: lastPositionRef.current.y,
+          x1: logicalCoords.x,
+          y1: logicalCoords.y,
+          color: drawingColor,
+          lineWidth: strokeWidth,
+          opacity: opacity,
+          userId: userId
+        };
+        
+        // Store drawing data locally for redrawing
+        setDrawingData(prev => [...prev, drawData]);
+        
+        // Draw the line immediately (this will apply transform automatically)
+        drawLine(drawData);
+        
+        // Send to other users (they will receive logical coordinates)
+        socketRef.current.emit('drawing', drawData);
+      }
+      
+      // Update last position with logical coordinates
+      lastPositionRef.current = logicalCoords;
+      return;
+    }
+    
+    // Handle eraser movement
+    if (isDrawing && currentTool === 'eraser') {
+      eraseAtPosition(logicalCoords);
+      return;
+    }
+    
+    // Handle shape drawing
+    if (isDrawingShape && shapeStartPos && currentShape) {
+      const width = logicalCoords.x - shapeStartPos.x;
+      const height = logicalCoords.y - shapeStartPos.y;
+      
+      setCurrentShape(prev => ({
+        ...prev,
+        width: width,
+        height: height
+      }));
+      
+      // Redraw canvas to show current shape
+      redrawCanvas();
+    }
+  }, [isDrawing, isDrawingShape, drawLine, draggingNote, drawingColor, strokeWidth, opacity, userId, currentTool, scale, panX, panY, shapeStartPos, currentShape, redrawCanvas]);
 
   const stopDrawing = useCallback(() => {
+    // Handle pen drawing stop
     setIsDrawing(false);
     lastPositionRef.current = null;
+    
+    // Handle shape drawing completion
+    if (isDrawingShape && currentShape) {
+      console.log('Completing shape:', currentShape);
+      // Only add shape if it has meaningful size
+      if (Math.abs(currentShape.width) > 5 || Math.abs(currentShape.height) > 5) {
+        const finalShape = { ...currentShape, id: Date.now() };
+        console.log('Shape has meaningful size, adding to canvas:', finalShape);
+        setShapes(prev => [...prev, finalShape]);
+        
+        // Test socket connection first
+        socketRef.current.emit('test', { message: 'testing socket connection' });
+        
+        // Send shape to other users
+        console.log('Emitting shape event:', finalShape);
+        socketRef.current.emit('shape', finalShape);
+      } else {
+        console.log('Shape too small, not adding:', currentShape.width, currentShape.height);
+      }
+      
+      setIsDrawingShape(false);
+      setShapeStartPos(null);
+      setCurrentShape(null);
+    }
+  }, [isDrawingShape, currentShape]);
+
+  const handleTextSubmit = useCallback(() => {
+    if (editingText && textInput.trim()) {
+      const textElement = {
+        ...editingText,
+        text: textInput.trim(),
+        id: Date.now()
+      };
+      
+      setTextElements(prev => [...prev, textElement]);
+      socketRef.current.emit('text', textElement);
+    }
+    
+    setEditingText(null);
+    setTextInput('');
+  }, [editingText, textInput]);
+
+  // Custom cursor management functions
+  const showCustomCursor = useCallback(() => {
+    if (eraserCursorRef.current && currentTool === 'eraser') {
+      eraserCursorRef.current.style.visibility = 'visible';
+    }
+  }, [currentTool]);
+
+  const hideCustomCursor = useCallback(() => {
+    if (eraserCursorRef.current) {
+      eraserCursorRef.current.style.visibility = 'hidden';
+    }
   }, []);
+
+  const updateCursorPosition = useCallback((e) => {
+    if (eraserCursorRef.current && currentTool === 'eraser') {
+      eraserCursorRef.current.style.left = e.clientX + 'px';
+      eraserCursorRef.current.style.top = e.clientY + 'px';
+    }
+  }, [currentTool]);
+
+  // Drawing board event handlers
+  const handleDrawingBoardMouseMove = useCallback((e) => {
+    updateCursorPosition(e);
+  }, [updateCursorPosition]);
+
+  const handleDrawingBoardMouseEnter = useCallback(() => {
+    showCustomCursor();
+  }, [showCustomCursor]);
+
+  const handleDrawingBoardMouseLeave = useCallback(() => {
+    hideCustomCursor();
+  }, [hideCustomCursor]);
+
+  // UI element event handlers
+  const handleUIElementMouseOver = useCallback(() => {
+    hideCustomCursor();
+  }, [hideCustomCursor]);
+
+  const handleUIElementMouseLeave = useCallback((e) => {
+    // Check if mouse is still over drawing board
+    if (drawingBoardRef.current) {
+      const rect = drawingBoardRef.current.getBoundingClientRect();
+      const isOverDrawingBoard = (
+        e.clientX >= rect.left &&
+        e.clientX <= rect.right &&
+        e.clientY >= rect.top &&
+        e.clientY <= rect.bottom
+      );
+      
+      if (isOverDrawingBoard) {
+        showCustomCursor();
+        updateCursorPosition(e);
+      }
+    }
+  }, [showCustomCursor, updateCursorPosition]);
+
+  const eraseAtPosition = useCallback((coords) => {
+    console.log('Erasing at position:', coords, 'current tool:', currentTool);
+    const eraseRadius = eraserSize / 2;
+    
+    // Add to eraser trail for animation
+    const trailPoint = {
+      x: coords.x * scale + panX,
+      y: coords.y * scale + panY,
+      timestamp: Date.now(),
+      id: Math.random()
+    };
+    
+    setEraserTrail(prev => {
+      const newTrail = [...prev, trailPoint];
+      // Keep only recent trail points (last 300ms)
+      const cutoffTime = Date.now() - 300;
+      return newTrail.filter(point => point.timestamp > cutoffTime);
+    });
+    
+    // Erase drawing data (lines)
+    const newDrawingData = drawingData.filter(line => {
+      // Check if line intersects with eraser circle
+      const distance = distanceToLineSegment(
+        coords, 
+        { x: line.x0, y: line.y0 }, 
+        { x: line.x1, y: line.y1 }
+      );
+      return distance > eraseRadius;
+    });
+    
+    if (newDrawingData.length !== drawingData.length) {
+      setDrawingData(newDrawingData);
+      console.log('Emitting erase-drawing event:', { x: coords.x, y: coords.y, radius: eraseRadius });
+      socketRef.current.emit('erase-drawing', { x: coords.x, y: coords.y, radius: eraseRadius });
+    }
+    
+    // Erase shapes
+    const newShapes = shapes.filter(shape => {
+      // Check if point is inside shape bounds
+      const shapeX = Math.min(shape.x, shape.x + shape.width);
+      const shapeY = Math.min(shape.y, shape.y + shape.height);
+      const shapeWidth = Math.abs(shape.width);
+      const shapeHeight = Math.abs(shape.height);
+      
+      return !(coords.x >= shapeX - eraseRadius && 
+               coords.x <= shapeX + shapeWidth + eraseRadius &&
+               coords.y >= shapeY - eraseRadius && 
+               coords.y <= shapeY + shapeHeight + eraseRadius);
+    });
+    
+    if (newShapes.length !== shapes.length) {
+      setShapes(newShapes);
+      console.log('Emitting erase-shapes event:', { x: coords.x, y: coords.y, radius: eraseRadius });
+      socketRef.current.emit('erase-shapes', { x: coords.x, y: coords.y, radius: eraseRadius });
+    }
+    
+    // Erase text elements
+    const newTextElements = textElements.filter(text => {
+      const distance = Math.sqrt(
+        Math.pow(coords.x - text.x, 2) + Math.pow(coords.y - text.y, 2)
+      );
+      return distance > eraseRadius;
+    });
+    
+    if (newTextElements.length !== textElements.length) {
+      setTextElements(newTextElements);
+      console.log('Emitting erase-text event:', { x: coords.x, y: coords.y, radius: eraseRadius });
+      socketRef.current.emit('erase-text', { x: coords.x, y: coords.y, radius: eraseRadius });
+    }
+  }, [eraserSize, drawingData, shapes, textElements, scale, panX, panY, currentTool]);
 
   const handleWheel = useCallback((e) => {
     e.preventDefault();
@@ -295,11 +775,15 @@ const Canvas = () => {
 
   const clearCanvas = () => {
     setDrawingData([]);
+    setShapes([]);
+    setTextElements([]);
     // redrawCanvas will be called automatically by useEffect when drawingData changes
   };
 
   const handleClearCanvas = () => {
     setDrawingData([]);
+    setShapes([]);
+    setTextElements([]);
     socketRef.current.emit('clear-canvas');
   };
 
@@ -348,6 +832,8 @@ const Canvas = () => {
           userColor: userColor,
           userInitials: getUserInitials(userId)
         };
+
+        console.log('Creating voice note at position:', voiceNote.x, voiceNote.y);
 
         setVoiceNotes(prev => [...prev, voiceNote]);
         socketRef.current.emit('voice-note', voiceNote);
@@ -476,8 +962,10 @@ const Canvas = () => {
       onClick={onClick}
       title={title}
       className={`toolbar-btn ${active ? 'active' : ''}`}
+      onMouseOver={handleUIElementMouseOver}
+      onMouseLeave={handleUIElementMouseLeave}
     >
-      {icon}
+      {typeof icon === 'string' ? icon : <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{icon}</span>}
     </button>
   );
 
@@ -576,6 +1064,11 @@ const Canvas = () => {
             align-items: center;
             gap: 4px;
             z-index: 1000;
+            cursor: auto !important;
+          }
+          
+          .top-toolbar * {
+            cursor: pointer !important;
           }
           
           .toolbar-btn {
@@ -583,7 +1076,7 @@ const Canvas = () => {
             background: none;
             padding: 8px;
             border-radius: 6px;
-            cursor: pointer;
+            cursor: pointer !important;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -677,7 +1170,7 @@ const Canvas = () => {
             min-width: 32px;
             min-height: 32px;
             border-radius: 8px;
-            cursor: pointer;
+            cursor: pointer !important;
             transition: all 0.15s ease;
             border: 2px solid transparent;
             flex-shrink: 0;
@@ -705,7 +1198,7 @@ const Canvas = () => {
             background: #f9fafb;
             padding: 12px;
             border-radius: 6px;
-            cursor: pointer;
+            cursor: pointer !important;
             transition: all 0.15s ease;
             border: 2px solid transparent;
             display: flex;
@@ -773,7 +1266,7 @@ const Canvas = () => {
             background: none;
             padding: 6px;
             border-radius: 4px;
-            cursor: pointer;
+            cursor: pointer !important;
             color: #374151;
             font-size: 14px;
             min-width: 32px;
@@ -845,7 +1338,7 @@ const Canvas = () => {
             border-radius: 8px;
             padding: 8px 16px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-            cursor: pointer;
+            cursor: pointer !important;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -869,7 +1362,7 @@ const Canvas = () => {
             border-radius: 8px;
             padding: 8px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-            cursor: pointer;
+            cursor: pointer !important;
             z-index: 1001;
             display: flex;
             align-items: center;
@@ -881,6 +1374,38 @@ const Canvas = () => {
           .sidebar-toggle:hover {
             background-color: #f9fafb;
           }
+
+          /* Eraser Cursor */
+          .eraser-cursor {
+            position: fixed;
+            pointer-events: none;
+            z-index: 10000;
+            border: 2px solid #374151;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.1);
+            transform: translate(-50%, -50%);
+          }
+
+          .eraser-trail-point {
+            position: fixed;
+            pointer-events: none;
+            z-index: 9999;
+            background: rgba(239, 68, 68, 0.3);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            animation: eraser-fade 300ms ease-out forwards;
+          }
+
+          @keyframes eraser-fade {
+            0% {
+              opacity: 0.6;
+              transform: translate(-50%, -50%) scale(1);
+            }
+            100% {
+              opacity: 0;
+              transform: translate(-50%, -50%) scale(0.3);
+            }
+          }
         `}
       </style>
 
@@ -888,38 +1413,46 @@ const Canvas = () => {
       <button 
         className="sidebar-toggle"
         onClick={() => setSidebarOpen(!sidebarOpen)}
+        onMouseOver={handleUIElementMouseOver}
+        onMouseLeave={handleUIElementMouseLeave}
       >
         <span style={{ fontSize: '18px' }}>☰</span>
       </button>
 
       {/* Top Toolbar */}
       <div className="top-toolbar">
-        <ToolbarButton icon="🔒" active={false} onClick={() => {}} title="Lock" />
-        <ToolbarButton icon="👆" active={currentTool === 'select'} onClick={() => setCurrentTool('select')} title="Select" />
-        <ToolbarButton icon="🖐" active={currentTool === 'hand'} onClick={() => setCurrentTool('hand')} title="Hand" />
+        <ToolbarButton icon={<Hand size={18} />} active={currentTool === 'hand'} onClick={() => setCurrentTool('hand')} title="Hand" />
         <div className="toolbar-divider" />
-        <ToolbarButton icon="⬜" active={currentTool === 'rectangle'} onClick={() => setCurrentTool('rectangle')} title="Rectangle" />
-        <ToolbarButton icon="◇" active={currentTool === 'diamond'} onClick={() => setCurrentTool('diamond')} title="Diamond" />
-        <ToolbarButton icon="○" active={currentTool === 'circle'} onClick={() => setCurrentTool('circle')} title="Circle" />
-        <ToolbarButton icon="→" active={currentTool === 'arrow'} onClick={() => setCurrentTool('arrow')} title="Arrow" />
-        <ToolbarButton icon="—" active={currentTool === 'line'} onClick={() => setCurrentTool('line')} title="Line" />
+        <ToolbarButton icon={<Square size={18} />} active={currentTool === 'rectangle'} onClick={() => setCurrentTool('rectangle')} title="Rectangle" />
+        <ToolbarButton icon={<Diamond size={18} />} active={currentTool === 'diamond'} onClick={() => setCurrentTool('diamond')} title="Diamond" />
+        <ToolbarButton icon={<Circle size={18} />} active={currentTool === 'circle'} onClick={() => setCurrentTool('circle')} title="Circle" />
+        <ToolbarButton icon={<ArrowRight size={18} />} active={currentTool === 'arrow'} onClick={() => setCurrentTool('arrow')} title="Arrow" />
+        <ToolbarButton icon={<Minus size={18} />} active={currentTool === 'line'} onClick={() => setCurrentTool('line')} title="Line" />
         <div className="toolbar-divider" />
-        <ToolbarButton icon="✏️" active={currentTool === 'pen'} onClick={() => setCurrentTool('pen')} title="Pen" />
-        <ToolbarButton icon="A" active={currentTool === 'text'} onClick={() => setCurrentTool('text')} title="Text" />
-        <ToolbarButton icon="🖼" active={false} onClick={() => {}} title="Image" />
-        <ToolbarButton icon="🎙" active={isRecording} onClick={isRecording ? stopRecording : startRecording} title={isRecording ? 'Stop Recording' : 'Record Voice Note'} />
+        <ToolbarButton icon={<PenTool size={18} />} active={currentTool === 'pen'} onClick={() => setCurrentTool('pen')} title="Pen" />
+        <ToolbarButton icon={<Type size={18} />} active={currentTool === 'text'} onClick={() => setCurrentTool('text')} title="Text" />
+        <ToolbarButton icon={<Eraser size={18} />} active={currentTool === 'eraser'} onClick={() => setCurrentTool('eraser')} title="Eraser" />
+        <ToolbarButton icon={<Mic size={18} />} active={isRecording} onClick={isRecording ? stopRecording : startRecording} title={isRecording ? 'Stop Recording' : 'Record Voice Note'} />
         <div className="toolbar-divider" />
-        <ToolbarButton icon="🗑️" active={false} onClick={handleClearCanvas} title="Clear Canvas" />
+        <ToolbarButton icon={<Trash2 size={18} />} active={false} onClick={handleClearCanvas} title="Clear Canvas" />
       </div>
 
       {/* Library Button */}
-      <button className="library-btn">
+      {/* <button 
+        className="library-btn"
+        onMouseOver={handleUIElementMouseOver}
+        onMouseLeave={handleUIElementMouseLeave}
+      >
         <span style={{ fontSize: '16px' }}>📚</span>
         Library
-      </button>
+      </button> */}
 
       {/* Left Sidebar */}
-      <div className="left-sidebar">
+      <div 
+        className="left-sidebar"
+        onMouseOver={handleUIElementMouseOver}
+        onMouseLeave={handleUIElementMouseLeave}
+      >
         <div className="sidebar-section">
           <div className="sidebar-title">Stroke</div>
           <div className="color-grid">
@@ -975,7 +1508,11 @@ const Canvas = () => {
       </div>
 
       {/* Bottom Controls */}
-      <div className="bottom-controls">
+      <div 
+        className="bottom-controls"
+        onMouseOver={handleUIElementMouseOver}
+        onMouseLeave={handleUIElementMouseLeave}
+      >
         <button 
           className="zoom-btn"
           onClick={() => setScale(Math.max(0.25, scale - 0.25))}
@@ -1012,17 +1549,25 @@ const Canvas = () => {
 
       {/* Main Canvas */}
       <div
-        ref={containerRef}
+        ref={(node) => {
+          containerRef.current = node;
+          drawingBoardRef.current = node;
+        }}
         style={{ 
           position: 'absolute',
           top: 0,
           left: 0,
           width: '100vw',
           height: '100vh',
-          cursor: currentTool === 'pen' ? 'crosshair' : 'default'
+          cursor: currentTool === 'pen' ? 'crosshair' : (currentTool === 'eraser' ? 'none' : 'default')
         }}
-        onMouseMove={handleMouseMove}
+        onMouseMove={(e) => {
+          handleMouseMove(e);
+          handleDrawingBoardMouseMove(e);
+        }}
         onMouseUp={handleMouseUp}
+        onMouseEnter={handleDrawingBoardMouseEnter}
+        onMouseLeave={handleDrawingBoardMouseLeave}
       >
         <canvas
           ref={canvasRef}
@@ -1030,7 +1575,7 @@ const Canvas = () => {
             position: 'absolute',
             top: 0,
             left: 0,
-            cursor: draggingNote ? 'grabbing' : (currentTool === 'pen' ? 'crosshair' : (currentTool === 'hand' ? 'grab' : 'default'))
+            cursor: draggingNote ? 'grabbing' : (currentTool === 'pen' ? 'crosshair' : (currentTool === 'hand' ? 'grab' : (currentTool === 'eraser' ? 'none' : 'default')))
           }}
           onMouseDown={startDrawing}
           onMouseMove={draw}
@@ -1062,6 +1607,7 @@ const Canvas = () => {
               style={{
                 left: screenX - 20,
                 top: screenY - 20,
+                backgroundColor: note.userColor || '#3b82f6',
               }}
               title="Click to play, drag to move"
             >
@@ -1069,6 +1615,66 @@ const Canvas = () => {
             </div>
           );
         })}
+
+        {/* Text input */}
+        {editingText && (
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleTextSubmit();
+              } else if (e.key === 'Escape') {
+                setEditingText(null);
+                setTextInput('');
+              }
+            }}
+            onBlur={handleTextSubmit}
+            style={{
+              position: 'absolute',
+              left: editingText.x * scale + panX,
+              top: editingText.y * scale + panY - 20,
+              border: '1px solid #ccc',
+              background: 'white',
+              padding: '4px 8px',
+              fontSize: '16px',
+              borderRadius: '4px',
+              minWidth: '100px',
+              zIndex: 1000
+            }}
+            autoFocus
+            placeholder="Enter text..."
+          />
+        )}
+
+      {/* Custom Eraser Cursor - Outside main container */}
+      <div
+        ref={eraserCursorRef}
+        className="eraser-cursor"
+        style={{
+          left: 0,
+          top: 0,
+          width: eraserSize,
+          height: eraserSize,
+          visibility: 'hidden',
+          pointerEvents: 'none'
+        }}
+      />
+
+        {/* Eraser trail animation */}
+        {eraserTrail.map((point) => (
+          <div
+            key={point.id}
+            className="eraser-trail-point"
+            style={{
+              left: point.x,
+              top: point.y,
+              width: eraserSize * 0.6,
+              height: eraserSize * 0.6,
+            }}
+          />
+        ))}
       </div>
     </div>
   );

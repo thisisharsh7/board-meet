@@ -17,7 +17,9 @@ export const useSocketHandler = ({
   useEffect(() => {
     // Initialize socket connection
     const isDev = import.meta.env.DEV;
-    socketRef.current = io(isDev ? 'http://localhost:3001' : '/api');
+    socketRef.current = io(isDev ? 'http://localhost:3001' : window.location.origin, {
+      path: '/api/socket'
+    });
     const socket = socketRef.current;
 
     // Socket event listeners

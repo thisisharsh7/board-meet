@@ -115,7 +115,21 @@ export const useCanvasEvents = ({
       console.log('Emitting erase-text event:', { x: coords.x, y: coords.y, radius: eraseRadius });
       socketRef.current.emit('erase-text', { x: coords.x, y: coords.y, radius: eraseRadius });
     }
-  }, [eraserSize, drawingData, shapes, textElements, scale, panX, panY, currentTool, setDrawingData, setShapes, setTextElements, socketRef]);
+
+    // Erase voice notes
+    const newVoiceNotes = voiceNotes.filter(note => {
+      const distance = Math.sqrt(
+        Math.pow(coords.x - note.x, 2) + Math.pow(coords.y - note.y, 2)
+      );
+      return distance > eraseRadius;
+    });
+
+    if (newVoiceNotes.length !== voiceNotes.length) {
+      setVoiceNotes(newVoiceNotes);
+      console.log('Emitting erase-voice-notes event:', { x: coords.x, y: coords.y, radius: eraseRadius });
+      socketRef.current.emit('erase-voice-notes', { x: coords.x, y: coords.y, radius: eraseRadius });
+    }
+  }, [eraserSize, drawingData, shapes, textElements, voiceNotes, scale, panX, panY, currentTool, setDrawingData, setShapes, setTextElements, setVoiceNotes, socketRef]);
 
   const startDrawing = useCallback((e) => {
     if (draggingNote) return;
@@ -279,18 +293,43 @@ export const useCanvasEvents = ({
   }, [editingText, textInput, setTextElements, socketRef]);
 
   // Voice note drag handlers
+  const [dragStartTime, setDragStartTime] = useState(null);
+  const [dragStartPos, setDragStartPos] = useState(null);
+  const [hasMoved, setHasMoved] = useState(false);
+  const dragTimeoutRef = useRef(null);
+
   const handleVoiceNoteMouseDown = useCallback((e, note) => {
     e.stopPropagation();
     e.preventDefault();
 
+    // Clear any existing timeout
+    if (dragTimeoutRef.current) {
+      clearTimeout(dragTimeoutRef.current);
+    }
+
     // Convert to logical coordinates
     const logicalCoords = getLogicalCoordinates(e, canvasRef, scale, panX, panY);
 
-    setDraggingNote(note.id);
+    // Don't immediately set dragging - wait for mouse move or timeout
+    setDragStartTime(Date.now());
+    setDragStartPos(logicalCoords);
+    setHasMoved(false);
     setDragOffset({
       x: logicalCoords.x - note.x,
       y: logicalCoords.y - note.y
     });
+
+    // Store the note ID but don't set as dragging yet
+    setDraggingNote(note.id);
+
+    // Clear dragging state after a short timeout if no movement occurs
+    dragTimeoutRef.current = setTimeout(() => {
+      setDraggingNote(null);
+      setDragStartTime(null);
+      setDragStartPos(null);
+      setDragOffset({ x: 0, y: 0 });
+      setHasMoved(false);
+    }, 150);
   }, [canvasRef, scale, panX, panY]);
 
   const handleMouseMove = useCallback((e) => {
@@ -306,7 +345,25 @@ export const useCanvasEvents = ({
     const logicalCoords = getLogicalCoordinates(e, canvasRef, scale, panX, panY);
     mousePositionRef.current = logicalCoords;
 
-    if (draggingNote) {
+    // Check if we should start dragging (mouse moved enough distance)
+    if (draggingNote && dragStartPos && !hasMoved) {
+      const distance = Math.sqrt(
+        Math.pow(logicalCoords.x - dragStartPos.x, 2) +
+        Math.pow(logicalCoords.y - dragStartPos.y, 2)
+      );
+
+      // If mouse moved more than 5 units, consider it a drag
+      if (distance > 5) {
+        // Clear the timeout since we're actually dragging
+        if (dragTimeoutRef.current) {
+          clearTimeout(dragTimeoutRef.current);
+          dragTimeoutRef.current = null;
+        }
+        setHasMoved(true);
+      }
+    }
+
+    if (draggingNote && hasMoved) {
       const newX = logicalCoords.x - dragOffset.x;
       const newY = logicalCoords.y - dragOffset.y;
 
@@ -318,27 +375,41 @@ export const useCanvasEvents = ({
     }
 
     return null;
-  }, [draggingNote, dragOffset, isPanning, panStart, scale, panX, panY, canvasRef, setVoiceNotes, mousePositionRef]);
+  }, [draggingNote, dragOffset, isPanning, panStart, scale, panX, panY, canvasRef, setVoiceNotes, mousePositionRef, dragStartPos, hasMoved]);
 
   const handleMouseUp = useCallback(() => {
+    // Clear any pending timeout
+    if (dragTimeoutRef.current) {
+      clearTimeout(dragTimeoutRef.current);
+      dragTimeoutRef.current = null;
+    }
+
     if (isPanning) {
       setIsPanning(false);
       return;
     }
-    
+
     if (draggingNote) {
-      const draggedNote = voiceNotes.find(note => note.id === draggingNote);
-      if (draggedNote) {
-        socketRef.current.emit('voice-note-moved', {
-          id: draggedNote.id,
-          x: draggedNote.x,
-          y: draggedNote.y
-        });
+      // Only emit position update if note actually moved
+      if (hasMoved) {
+        const draggedNote = voiceNotes.find(note => note.id === draggingNote);
+        if (draggedNote) {
+          socketRef.current.emit('voice-note-moved', {
+            id: draggedNote.id,
+            x: draggedNote.x,
+            y: draggedNote.y
+          });
+        }
       }
+
+      // Always clean up drag state on mouse up
       setDraggingNote(null);
       setDragOffset({ x: 0, y: 0 });
+      setDragStartTime(null);
+      setDragStartPos(null);
+      setHasMoved(false);
     }
-  }, [draggingNote, voiceNotes, isPanning, socketRef]);
+  }, [draggingNote, voiceNotes, isPanning, socketRef, hasMoved]);
 
   const handleWheel = useCallback((e) => {
     e.preventDefault();
@@ -349,6 +420,7 @@ export const useCanvasEvents = ({
   return {
     isDrawing,
     draggingNote,
+    hasMoved,
     dragOffset,
     isPanning,
     panStart,

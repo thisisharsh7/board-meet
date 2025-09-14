@@ -1,7 +1,8 @@
-const VoiceNotes = ({ 
+const VoiceNotes = ({
   voiceNotes,
   playingNotes,
   draggingNote,
+  hasMoved,
   scale,
   panX,
   panY,
@@ -12,7 +13,7 @@ const VoiceNotes = ({
     <>
       {voiceNotes.map(note => {
         const isPlaying = playingNotes.has(note.id);
-        const isDragging = draggingNote === note.id;
+        const isDragging = draggingNote === note.id && hasMoved;
 
         // Convert logical coordinates to screen coordinates for positioning
         const screenX = note.x * scale + panX;
@@ -25,7 +26,8 @@ const VoiceNotes = ({
             onMouseDown={(e) => handleVoiceNoteMouseDown(e, note)}
             onClick={(e) => {
               e.stopPropagation();
-              if (!isDragging) {
+              // Only prevent play if actually dragging (not just mouse down)
+              if (!(draggingNote === note.id && hasMoved)) {
                 playVoiceNote(note);
               }
             }}

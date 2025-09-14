@@ -113,6 +113,16 @@ export const useSocketHandler = ({
       }));
     });
 
+    socket.on('erase-voice-notes', (eraseData) => {
+      console.log('Received erase-voice-notes event:', eraseData);
+      setVoiceNotes(prev => prev.filter(note => {
+        const distance = Math.sqrt(
+          Math.pow(eraseData.x - note.x, 2) + Math.pow(eraseData.y - note.y, 2)
+        );
+        return distance > eraseData.radius;
+      }));
+    });
+
     socket.on('clear-canvas', () => {
       setDrawingData([]);
       setVoiceNotes([]);

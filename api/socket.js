@@ -1,42 +1,9 @@
-const { Server } = require('socket.io');
-const { createServer } = require('http');
+import { Server } from 'socket.io'
 
-// Store connected users (max 2)
-let connectedUsers = new Set();
-
-// Store drawing data, voice notes, shapes, and text elements
-let drawingData = [];
-let voiceNotes = [];
-let shapes = [];
-let textElements = [];
-
-// Helper function to calculate distance from point to line segment
-function distanceToLineSegment(point, lineStart, lineEnd) {
-  const A = point.x - lineStart.x;
-  const B = point.y - lineStart.y;
-  const C = lineEnd.x - lineStart.x;
-  const D = lineEnd.y - lineStart.y;
-
-  const dot = A * C + B * D;
-  const lenSq = C * C + D * D;
-
-  if (lenSq === 0) return Math.sqrt(A * A + B * B);
-
-  let param = dot / lenSq;
-  param = Math.max(0, Math.min(1, param));
-
-  const xx = lineStart.x + param * C;
-  const yy = lineStart.y + param * D;
-
-  const dx = point.x - xx;
-  const dy = point.y - yy;
-
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-const SocketHandler = (req, res) => {
+const ioHandler = (req, res) => {
   if (!res.socket.server.io) {
-    console.log('Setting up socket.io');
+    console.log('*First use, starting socket.io')
+
     const io = new Server(res.socket.server, {
       path: '/api/socket',
       addTrailingSlash: false,
@@ -44,9 +11,40 @@ const SocketHandler = (req, res) => {
         origin: "*",
         methods: ["GET", "POST"]
       }
-    });
+    })
 
-    res.socket.server.io = io;
+    // Store connected users (max 2)
+    let connectedUsers = new Set();
+
+    // Store drawing data, voice notes, shapes, and text elements
+    let drawingData = [];
+    let voiceNotes = [];
+    let shapes = [];
+    let textElements = [];
+
+    // Helper function to calculate distance from point to line segment
+    function distanceToLineSegment(point, lineStart, lineEnd) {
+      const A = point.x - lineStart.x;
+      const B = point.y - lineStart.y;
+      const C = lineEnd.x - lineStart.x;
+      const D = lineEnd.y - lineStart.y;
+
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+
+      if (lenSq === 0) return Math.sqrt(A * A + B * B);
+
+      let param = dot / lenSq;
+      param = Math.max(0, Math.min(1, param));
+
+      const xx = lineStart.x + param * C;
+      const yy = lineStart.y + param * D;
+
+      const dx = point.x - xx;
+      const dy = point.y - yy;
+
+      return Math.sqrt(dx * dx + dy * dy);
+    }
 
     io.on('connection', (socket) => {
       console.log('User connected:', socket.id);
@@ -96,7 +94,6 @@ const SocketHandler = (req, res) => {
       // Handle eraser events
       socket.on('erase-drawing', (eraseData) => {
         console.log('Backend received erase-drawing event:', eraseData);
-        // Filter out erased drawing data on server
         const eraseRadius = eraseData.radius;
         drawingData = drawingData.filter(line => {
           const distance = distanceToLineSegment(
@@ -129,7 +126,7 @@ const SocketHandler = (req, res) => {
           const distance = Math.sqrt(
             Math.pow(eraseData.x - text.x, 2) + Math.pow(eraseData.y - text.y, 2)
           );
-          return distance > eraseData.radius;
+          return distance > eraseRadius;
         });
         socket.broadcast.emit('erase-text', eraseData);
       });
@@ -151,7 +148,6 @@ const SocketHandler = (req, res) => {
 
       // Handle voice note movement
       socket.on('voice-note-moved', (data) => {
-        // Update the voice note position in server storage
         const noteIndex = voiceNotes.findIndex(note => note.id === data.id);
         if (noteIndex !== -1) {
           voiceNotes[noteIndex].x = data.x;
@@ -166,9 +162,10 @@ const SocketHandler = (req, res) => {
         io.emit('user-count', connectedUsers.size);
       });
     });
+
+    res.socket.server.io = io
   }
+  res.end()
+}
 
-  res.end();
-};
-
-export default SocketHandler;
+export default ioHandler

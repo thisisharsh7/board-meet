@@ -96,6 +96,7 @@ const Canvas = () => {
   // Canvas events
   const {
     draggingNote,
+    hasMoved,
     editingText,
     textInput,
     setTextInput,
@@ -178,6 +179,7 @@ const Canvas = () => {
     setDrawingData([]);
     setShapes([]);
     setTextElements([]);
+    setVoiceNotes([]);
   };
 
   const handleClearCanvas = () => {
@@ -275,6 +277,7 @@ const Canvas = () => {
         voiceNotes={voiceNotes}
         playingNotes={playingNotes}
         draggingNote={draggingNote}
+        hasMoved={hasMoved}
         scale={scale}
         panX={panX}
         panY={panY}
